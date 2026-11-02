@@ -59,8 +59,10 @@
 				<button id="resume-button" type="button" disabled>Resume</button>
 				<button id="stop-button" type="button" disabled>Stop</button>
 				<button class="danger" id="reset-button" type="button">Reset / clear</button>
+				<button id="test-button" type="button">Run self-tests</button>
 				<span class="status" id="recording-status" role="status" aria-live="polite">Stopped</span>
 			</div>
+			<p id="test-results" class="help" role="status" aria-live="polite"></p>
 			<div class="stats">
 				<span>Duration: <strong id="duration">00:00:00</strong></span>
 				<span>Events this session: <strong id="event-count">0</strong></span>
@@ -70,12 +72,12 @@
 		<section class="card" aria-labelledby="test-heading">
 			<h2 id="test-heading">Explicit test area</h2>
 			<label for="key-area">Focus here, then press or release keys. Native editing is preserved.</label>
-			<textarea id="key-area" rows="4" readonly placeholder="Start a session to enable the test area" aria-describedby="area-help"></textarea>
-			<p class="help" id="area-help">Key events describe physical/logical keys; input and composition events describe browser text editing. Tab is kept in this area while recording. Do not enter passwords or other sensitive text.</p>
-			<p class="privacy">Local only: event details remain in this page and are never uploaded. Text content is not added to event history; input data is represented only by its character count.</p>
+			<textarea id="key-area" rows="4" placeholder="Start a session to enable the test area" aria-describedby="area-help"></textarea>
+			<p class="help" id="area-help">Letters you type stay visible here. Key events describe physical/logical keys; input and composition events describe browser text editing. Tab navigates normally; recording is limited to this area, and leaving it clears held-key status. Do not enter passwords or other sensitive text.</p>
+			<p class="privacy">Local only: typed text stays in this textarea and is never copied into event history or transmitted. Input and composition history stores only character counts (when available), not text. Reset / clear removes the textarea contents and all retained events. No background keyboard monitoring runs.</p>
 		</section>
 
-		<section class="card" aria-labelledby="live-heading" aria-live="polite">
+		<section class="card" aria-labelledby="live-heading">
 			<h2 id="live-heading">Live keyboard status</h2>
 			<div class="key-status">
 				<div class="key-box"><span>Last pressed</span><strong id="last-pressed">—</strong></div>
@@ -129,6 +131,8 @@
 			held: $('held-keys'), filter: $('event-filter'), special: $('special-filter'),
 			limit: $('history-limit'), visible: $('visible-count'), empty: $('empty-history')
 		};
+		ui.test = $('test-button');
+		ui.testResults = $('test-results');
 		let state = 'idle';
 		let eventCount = 0;
 		let elapsedMs = 0;
@@ -143,6 +147,27 @@
 				.map((part) => String(part).padStart(2, '0')).join(':');
 		};
 		const specialKey = (key) => !key || key === 'Dead' || key === 'Process' || Array.from(key).length !== 1;
+		const emptyModifiers = () => ({ Ctrl: false, Alt: false, Shift: false, Meta: false, AltGraph: false });
+		const canTransition = (from, to) => ({
+			idle: ['recording'], recording: ['paused', 'stopped', 'idle'],
+			paused: ['recording', 'stopped', 'idle'], stopped: ['idle']
+		}[from] || []).includes(to);
+		function readModifierState(event) {
+			const altGraph = typeof event.getModifierState === 'function' && event.getModifierState('AltGraph');
+			return {
+				// AltGraph is often exposed as Ctrl+Alt too; avoid reporting those aliases twice.
+				Ctrl: Boolean(event.ctrlKey && !altGraph), Alt: Boolean(event.altKey && !altGraph),
+				Shift: Boolean(event.shiftKey), Meta: Boolean(event.metaKey), AltGraph: Boolean(altGraph)
+			};
+		}
+		function makeTextSnapshot(event) {
+			return {
+				type: event.type, key: '', code: '', repeat: false, special: false, combination: '',
+				altGraph: modifierState.AltGraph,
+				dataLength: typeof event.data === 'string' ? Array.from(event.data).length : null,
+				inputType: typeof event.inputType === 'string' ? event.inputType : ''
+			};
+		}
 
 		function updateStatus() {
 			document.body.dataset.state = state;
@@ -158,6 +183,14 @@
 		function updateDuration() {
 			const current = elapsedMs + (state === 'recording' ? performance.now() - runningSince : 0);
 			ui.duration.textContent = formatDuration(current);
+		}
+
+		function clearKeyboardState() {
+			held.clear();
+			modifierState = emptyModifiers();
+			renderHeld();
+			ui.modifiers.textContent = 'None';
+			ui.combination.textContent = '—';
 		}
 
 		function renderHeld() {
@@ -215,8 +248,10 @@
 			if (state !== 'recording') return;
 			eventCount++;
 			entry.number = eventCount;
-			entry.time = new Date().toLocaleTimeString();
-			entry.sessionTimeMs = Math.round(elapsedMs + performance.now() - runningSince);
+			const monotonicNow = performance.now();
+			entry.timestamp = new Date().toISOString();
+			entry.time = entry.timestamp;
+			entry.sessionTimeMs = elapsedMs + monotonicNow - runningSince;
 			entry.modifiers = modifierNames(modifierState);
 			events.push(entry);
 			const limit = Number(ui.limit.value);
@@ -234,10 +269,7 @@
 
 		function snapshotKeyEvent(event, type) {
 			const key = displayKey(event.key);
-			modifierState = {
-				Ctrl: event.ctrlKey, Alt: event.altKey, Shift: event.shiftKey, Meta: event.metaKey,
-				AltGraph: typeof event.getModifierState === 'function' && event.getModifierState('AltGraph')
-			};
+			modifierState = readModifierState(event);
 			const identity = event.code || event.key;
 			if (type === 'keydown') held.set(identity, key);
 			else held.delete(identity);
@@ -259,18 +291,12 @@
 
 		function textEvent(event) {
 			if (state !== 'recording') return;
-			// Never retain inserted text or composition data; length and native inputType are enough to audit behavior.
-			const dataLength = typeof event.data === 'string' ? Array.from(event.data).length : null;
-			record({
-				type: event.type, key: '', code: '', repeat: false, special: false, combination: '',
-				altGraph: modifierState.AltGraph, dataLength,
-				inputType: typeof event.inputType === 'string' ? event.inputType : ''
-			});
+			// Read data only to derive its length; never retain inserted text or composition data.
+			record(makeTextSnapshot(event));
 		}
 
 		area.addEventListener('keydown', (event) => {
 			if (state !== 'recording' || event.target !== area) return;
-			if (event.key === 'Tab') event.preventDefault();
 			snapshotKeyEvent(event, 'keydown');
 		});
 		area.addEventListener('keyup', (event) => {
@@ -280,64 +306,143 @@
 		area.addEventListener('input', textEvent);
 		for (const type of ['compositionstart', 'compositionupdate', 'compositionend']) area.addEventListener(type, textEvent);
 		area.addEventListener('blur', () => {
-			// Browsers may omit keyup when focus changes; clear held state rather than showing stuck keys.
-			held.clear();
-			renderHeld();
+			// Browsers may omit keyup on focus loss; clear held keys and modifier indicators.
+			clearKeyboardState();
+		});
+		window.addEventListener('blur', clearKeyboardState);
+		document.addEventListener('visibilitychange', () => {
+			if (document.hidden) clearKeyboardState();
 		});
 
-		ui.start.addEventListener('click', () => {
-			if (state !== 'idle') return;
+		function startSession() {
+			if (state !== 'idle' || !canTransition(state, 'recording')) return false;
 			state = 'recording';
 			runningSince = performance.now();
 			updateStatus();
-			area.focus();
 			updateDuration();
-		});
-		ui.pause.addEventListener('click', () => {
-			if (state !== 'recording') return;
+			return true;
+		}
+		function pauseSession() {
+			if (state !== 'recording' || !canTransition(state, 'paused')) return false;
 			elapsedMs += performance.now() - runningSince;
 			state = 'paused';
-			held.clear();
-			renderHeld();
+			clearKeyboardState();
 			updateStatus();
 			updateDuration();
-		});
-		ui.resume.addEventListener('click', () => {
-			if (state !== 'paused') return;
+			return true;
+		}
+		function resumeSession() {
+			if (state !== 'paused' || !canTransition(state, 'recording')) return false;
 			state = 'recording';
 			runningSince = performance.now();
 			updateStatus();
-			area.focus();
 			updateDuration();
-		});
-		ui.stop.addEventListener('click', () => {
+			return true;
+		}
+		function stopSession() {
 			if (state === 'recording') elapsedMs += performance.now() - runningSince;
-			if (state !== 'recording' && state !== 'paused') return;
+			if (!canTransition(state, 'stopped')) return false;
 			state = 'stopped';
-			held.clear();
-			renderHeld();
+			clearKeyboardState();
 			updateStatus();
 			updateDuration();
-			area.blur();
-		});
-		ui.reset.addEventListener('click', () => {
+			return true;
+		}
+		function resetSession() {
 			state = 'idle';
 			eventCount = 0;
 			elapsedMs = 0;
 			runningSince = 0;
 			events.length = 0;
-			held.clear();
-			modifierState = { Ctrl: false, Alt: false, Shift: false, Meta: false, AltGraph: false };
+			clearKeyboardState();
 			area.value = '';
 			ui.pressed.textContent = '—';
 			ui.released.textContent = '—';
 			ui.modifiers.textContent = 'None';
 			ui.combination.textContent = '—';
 			ui.count.textContent = '0';
-			renderHeld();
 			updateStatus();
 			updateDuration();
 			renderHistory();
+		}
+
+		ui.start.addEventListener('click', () => {
+			if (startSession()) area.focus();
+		});
+		ui.pause.addEventListener('click', () => {
+			pauseSession();
+		});
+		ui.resume.addEventListener('click', () => {
+			if (resumeSession()) area.focus();
+		});
+		ui.stop.addEventListener('click', () => {
+			if (stopSession()) area.blur();
+		});
+		ui.reset.addEventListener('click', resetSession);
+		ui.test.addEventListener('click', () => {
+			// Exercise the real controller while preserving the user's current session and text.
+			const saved = {
+				state, eventCount, elapsedMs, runningSince, events: events.slice(), held: [...held],
+				modifierState: { ...modifierState }, areaValue: area.value,
+				pressed: ui.pressed.textContent, released: ui.released.textContent,
+				filter: ui.filter.value, special: ui.special.checked, limit: ui.limit.value
+			};
+			const runIsolated = (check) => {
+				try {
+					state = 'idle'; eventCount = 0; elapsedMs = 0; runningSince = 0;
+					events.length = 0; held.clear(); modifierState = emptyModifiers(); area.value = '';
+					ui.filter.value = 'all'; ui.special.checked = false; ui.limit.value = '500';
+					return Boolean(check());
+				} finally {
+					state = saved.state; eventCount = saved.eventCount; elapsedMs = saved.elapsedMs; runningSince = saved.runningSince;
+					events.splice(0, events.length, ...saved.events);
+					held.clear(); for (const [key, value] of saved.held) held.set(key, value);
+					modifierState = saved.modifierState; area.value = saved.areaValue;
+					ui.pressed.textContent = saved.pressed; ui.released.textContent = saved.released;
+					ui.filter.value = saved.filter; ui.special.checked = saved.special; ui.limit.value = saved.limit;
+					ui.count.textContent = String(eventCount);
+					updateStatus(); updateDuration(); renderHeld(); renderHistory();
+					ui.modifiers.textContent = modifierNames(modifierState).join(' + ') || 'None';
+				}
+			};
+			const checks = [
+				['session transitions', () => runIsolated(() => startSession() && state === 'recording' && pauseSession() && state === 'paused' && resumeSession() && state === 'recording' && stopSession() && state === 'stopped' && !startSession())],
+				['event recording and repeats', () => runIsolated(() => {
+					startSession();
+					const key = { key: 'a', code: 'KeyA', repeat: false, location: 0, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+					snapshotKeyEvent(key, 'keydown'); key.repeat = true; snapshotKeyEvent(key, 'keydown'); snapshotKeyEvent(key, 'keyup');
+					return events.length === 3 && events[1].repeat && events[0].key === 'a' && events[2].type === 'keyup';
+				})],
+				['filtering and history limit', () => runIsolated(() => {
+					startSession(); ui.filter.value = 'keyboard'; ui.limit.value = '100';
+					record({ type: 'keydown', key: 'Enter', code: 'Enter', special: true, combination: '', repeat: false, dataLength: null, inputType: '' });
+					record({ type: 'input', key: '', code: '', special: false, combination: '', repeat: false, dataLength: 1, inputType: 'insertText' });
+					ui.limit.value = '100';
+					return eventMatches(events[0]) && !eventMatches(events[1]) && historyList.children.length === 1;
+				})],
+				['modifier synchronization and AltGraph', () => runIsolated(() => {
+					startSession();
+					snapshotKeyEvent({ key: 'Control', code: 'ControlLeft', repeat: false, ctrlKey: true, altKey: false, shiftKey: false, metaKey: false }, 'keydown');
+					const ctrlWorks = modifierState.Ctrl && ui.modifiers.textContent === 'Ctrl';
+					snapshotKeyEvent({ key: 'AltGraph', code: 'AltRight', repeat: false, ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, getModifierState: (name) => name === 'AltGraph' }, 'keydown');
+					return ctrlWorks && modifierState.AltGraph && !modifierState.Ctrl && !modifierState.Alt;
+				})],
+				['reset clears session and text', () => runIsolated(() => {
+					startSession(); area.value = 'visible text'; record({ type: 'input', dataLength: 12, inputType: 'insertText', key: '', code: '', repeat: false, special: false, combination: '' });
+					resetSession();
+					return state === 'idle' && eventCount === 0 && events.length === 0 && area.value === '' && historyList.children.length === 0;
+				})],
+				['typed-text privacy snapshot', () => runIsolated(() => {
+					const snapshot = makeTextSnapshot({ type: 'input', data: 'private sample', inputType: 'insertText' });
+					return snapshot.dataLength === 14 && !('data' in snapshot) && !JSON.stringify(snapshot).includes('private sample');
+				})]
+			];
+			const results = checks.map(([name, check]) => {
+				try { return { name, passed: Boolean(check()) }; }
+				catch { return { name, passed: false }; }
+			});
+			const failed = results.filter((result) => !result.passed).map((result) => result.name);
+			ui.testResults.textContent = `Self-tests: ${results.length - failed.length}/${results.length} passed — ${failed.join(', ') || 'all checks passed'}.`;
 		});
 		ui.filter.addEventListener('change', renderHistory);
 		ui.special.addEventListener('change', renderHistory);
