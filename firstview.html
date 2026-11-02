@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Keyboard Key Tester</title>
+	<style>
+		/* Keep the tester readable and centered on the page. */
+		body { font: 16px system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; color: #202124; }
+		/* Make the key-capture input fill the available width. */
+		#key-area { width: 100%; box-sizing: border-box; padding: 1rem; font: inherit; }
+		/* Emphasize the most recently detected key. */
+		#last-key { font-size: 2rem; font-weight: 700; }
+		/* Allow long typed text to wrap instead of overflowing. */
+		#live-view { min-height: 1.5em; overflow-wrap: anywhere; }
+		/* Style the key details as a distinct information panel. */
+		.panel { margin: 1rem 0; padding: 1rem; background: #f1f3f4; border-radius: 8px; }
+		/* Visually distinguish displayed key values. */
+		code { background: #e8eaed; padding: .15rem .35rem; border-radius: 4px; }
+	</style>
+</head>
+<body>
+	<h1>Keyboard Key Tester</h1>
+	<p>Click the box and press keys to see which key this computer detects.</p>
+	<!-- Start and stop keyboard press registration. -->
+	<p>
+		<button id="start-button" type="button">Start</button>
+		<button id="stop-button" type="button" disabled>Stop</button>
+		<span id="recording-status" role="status">Registration stopped</span>
+	</p>
+	<!-- This input receives keyboard events for the tester. -->
+	<input id="key-area" type="text" autocomplete="off" disabled placeholder="Click Start to begin" aria-label="Press keys here">
+	<!-- These elements show the latest key, typed text, and modifier state. -->
+	<section class="panel" aria-live="polite">
+		<div>Last key detected:</div>
+		<div id="last-key">—</div>
+		<p>Live view:</p>
+		<div id="live-view" aria-live="polite">Start typing…</div>
+		<p>Key: <code id="key-value">—</code> &nbsp; Physical key: <code id="code-value">—</code></p>
+		<p>Modifiers: <span id="modifiers">None</span></p>
+	</section>
+	<!-- The most recent key presses are added to this list. -->
+	<h2>Recent key presses</h2>
+	<ol id="history"></ol>
+	<script>
+		// Cache the page elements used while handling keyboard input.
+		const area = document.getElementById('key-area');
+		const history = document.getElementById('history');
+		const liveView = document.getElementById('live-view');
+		const startButton = document.getElementById('start-button');
+		const stopButton = document.getElementById('stop-button');
+		const recordingStatus = document.getElementById('recording-status');
+		// Keep a separate display string so special keys can be handled explicitly.
+		let typedText = '';
+		let isRecording = false;
+
+		startButton.addEventListener('click', () => {
+			isRecording = true;
+			area.disabled = false;
+			area.placeholder = 'Press keys here';
+			startButton.disabled = true;
+			stopButton.disabled = false;
+			recordingStatus.textContent = 'Registration started';
+			area.focus();
+		});
+
+		stopButton.addEventListener('click', () => {
+			isRecording = false;
+			area.disabled = true;
+			area.placeholder = 'Click Start to begin';
+			startButton.disabled = false;
+			stopButton.disabled = true;
+			recordingStatus.textContent = 'Registration stopped';
+		});
+
+		area.addEventListener('keydown', (event) => {
+			if (!isRecording) return;
+			// Prevent the browser from applying its normal input behavior.
+			event.preventDefault();
+			// Update the live text for printable keys, Enter, and Backspace.
+			if (event.key === 'Backspace') {
+				typedText = typedText.slice(0, -1);
+			} else if (event.key === 'Enter') {
+				typedText += '\n';
+			} else if (event.key === ' ' || event.key.length === 1) {
+				typedText += event.key;
+			}
+			liveView.textContent = typedText || 'Start typing…';
+
+			// Convert the space key to a readable label and collect active modifiers.
+			const key = event.key === ' ' ? 'Space' : event.key;
+			const modifiers = [
+				event.ctrlKey && 'Ctrl',
+				event.altKey && 'Alt',
+				event.shiftKey && 'Shift',
+				event.metaKey && 'Meta'
+			].filter(Boolean);
+
+			// Refresh the current-key details shown on the page.
+			document.getElementById('last-key').textContent = key;
+			document.getElementById('key-value').textContent = key;
+			document.getElementById('code-value').textContent = event.code;
+			document.getElementById('modifiers').textContent = modifiers.join(' + ') || 'None';
+
+			// Add this press to the front of the history and keep only 20 entries.
+			const item = document.createElement('li');
+			item.textContent = `${key} (code: ${event.code})`;
+			history.prepend(item);
+			if (history.children.length > 20) history.lastElementChild.remove();
+		});
+	</script>
+</body>
+</html>
